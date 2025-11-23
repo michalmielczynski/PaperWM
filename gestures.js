@@ -90,6 +90,13 @@ export function enable(extension) {
             navigator.connect('destroy', () => {
                 vState = -1;
             });
+
+            // On GNOME 49, take ownership early so GNOME trackers do not pre-empt gestures we handle
+            const handlesWorkspace = gestureWorkspaceFingers() !== 0 && gestureWorkspaceFingers() === fingers;
+            const handlesHorizontal = gestureHorizontalFingers() === fingers;
+            if (gestureEnabled() && (handlesWorkspace || handlesHorizontal)) {
+                swipeTrackersEnable(false);
+            }
             return Clutter.EVENT_STOP;
         case Clutter.TouchpadGesturePhase.UPDATE:
             if (shouldPropagate(fingers)) {
@@ -101,7 +108,10 @@ export function enable(extension) {
             }
 
             if (enabled && direction === undefined) {
-                if (Math.abs(dx) < Math.abs(dy)) {
+                const absDx = Math.abs(dx);
+                const absDy = Math.abs(dy);
+                const verticalDominant = absDy > absDx * 1.4 && absDy > 0.25;
+                if (verticalDominant) {
                     vy = 0;
                     vState = phase;
                     direction = DIRECTIONS.Vertical;
@@ -109,7 +119,7 @@ export function enable(extension) {
             }
             if (enabled && direction === DIRECTIONS.Vertical) {
                 // if in overview => propagate event to overview
-                if (Main.overview.visible) {
+                if (Main.overview.visible || (Main.actionMode & Shell.ActionMode.OVERVIEW) > 0) {
                     return Clutter.EVENT_PROPAGATE;
                 }
 
@@ -123,7 +133,7 @@ export function enable(extension) {
                 let dir_y = -dy * natural * Settings.prefs.swipe_sensitivity[1];
                 // if not Tiling.inPreview and swipe is UP => propagate event to overview
                 if (!Tiling.inPreview && dir_y > 0) {
-                    // enable swipe trackers which enables 3-finger up overview
+                    // enable swipe trackers which enables overview to handle upward gesture
                     swipeTrackersEnable();
                     return Clutter.EVENT_PROPAGATE;
                 }
@@ -151,30 +161,23 @@ export function enable(extension) {
 }
 
 function shouldPropagate(fingers) {
-    if (
-        // gestures disabled ==> gnome default behaviour
-        !gestureEnabled()
-    ) {
+    // If gestures disabled, let GNOME handle everything
+    if (!gestureEnabled()) {
         swipeTrackersEnable();
         return true;
     }
-    else if (
-        fingers === 3 && gestureHorizontalFingers() !== 3
-    ) {
+
+    // If finger count doesn't match either configured horizontal or vertical, propagate
+    const matchHorizontal = fingers === gestureHorizontalFingers();
+    const matchVertical = fingers === gestureWorkspaceFingers();
+
+    if (!matchHorizontal && !matchVertical) {
         swipeTrackersEnable();
         return true;
     }
-    else if (
-        // if gesure enabled AND finger 4 AND horizontal finger != 4
-        fingers === 4 &&
-        gestureHorizontalFingers() !== 4 &&
-        gestureWorkspaceFingers() !== 4
-    ) {
-        return true;
-    }
-    else {
-        return false;
-    }
+
+    // Otherwise, we intend to own the gesture initially; we may hand off later explicitly
+    return false;
 }
 
 export function disable() {
@@ -202,6 +205,7 @@ export function gestureWorkspaceFingers() {
    connected from each space.background and bound to the space.
  */
 let start, dxs = [], dts = [];
+let horizontalDx = 0;
 export function horizontalScroll(space, _actor, event) {
     if (event.type() !== Clutter.EventType.TOUCHPAD_SWIPE) {
         return Clutter.EVENT_PROPAGATE;
@@ -226,23 +230,41 @@ export function horizontalScroll(space, _actor, event) {
     const phase = event.get_gesture_phase();
     const [dx] = event.get_gesture_motion_delta();
     switch (phase) {
+    case Clutter.TouchpadGesturePhase.BEGIN:
+        // Initialize tracking for a potential horizontal gesture and claim ownership from GNOME
+        horizontalDx = 0;
+        start = space.targetX;
+        space.hState = phase;
+        swipeTrackersEnable(false);
+        return Clutter.EVENT_STOP;
     case Clutter.TouchpadGesturePhase.UPDATE:
-        if (direction === undefined) {
-            space.vx = 0;
-            dxs = [];
-            dts = [];
-            space.hState = phase;
-            start = space.targetX;
-            Easer.removeEase(space.cloneContainer);
+        if (direction !== DIRECTIONS.Horizontal) {
             direction = DIRECTIONS.Horizontal;
+            horizontalDx = 0;
+            start = space.targetX;
+            space.hState = phase;
         }
-        return update(space, -dx * natural * Settings.prefs.swipe_sensitivity[0], event.get_time());
+        horizontalDx += dx;
+        return Clutter.EVENT_STOP;
     case Clutter.TouchpadGesturePhase.CANCEL:
+        horizontalDx = 0;
+        direction = undefined;
+        space.hState = phase;
+        navigator?.finish?.();
+        return Clutter.EVENT_STOP;
     case Clutter.TouchpadGesturePhase.END:
         space.hState = phase;
-        done(space, event);
-        dxs = [];
-        dts = [];
+        const movement = -horizontalDx * natural;
+        horizontalDx = 0;
+        direction = undefined;
+        if (Math.abs(movement) >= 0.5) {
+            if (movement > 0) {
+                space.switchRight(false);
+            } else {
+                space.switchLeft(false);
+            }
+        }
+        navigator?.finish?.();
         return Clutter.EVENT_STOP;
     }
 }

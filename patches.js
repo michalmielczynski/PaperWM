@@ -45,6 +45,21 @@ export function enable(extension) {
     enableOverrides();
     setupRuntimeDisables();
     setupActions();
+
+    // In GNOME 49 the overview internals may be rebuilt; refresh trackers
+    signals.connect(Main.overview, 'showing', () => {
+        setupSwipeTrackers();
+        // Ensure the overrides have the updated tracker objects
+        swipeTrackers.forEach(t => {
+            registerOverrideProp(t, "enabled", false, false);
+        });
+    });
+    signals.connect(Main.overview, 'hidden', () => {
+        setupSwipeTrackers();
+        swipeTrackers.forEach(t => {
+            registerOverrideProp(t, "enabled", false, false);
+        });
+    });
 }
 
 export function disable() {
@@ -554,12 +569,19 @@ export function restoreRuntimeDisables() {
  */
 export let swipeTrackers; // exported
 export function setupSwipeTrackers() {
-    swipeTrackers = [
-        Main?.overview?._swipeTracker, // gnome 40+
-        Main?.overview?._overview?._controls?._workspacesDisplay?._swipeTracker, // gnome 40+
-        Main?.wm?._workspaceAnimation?._swipeTracker, // gnome 40+
-        Main?.wm?._swipeTracker, // gnome 38 (and below)
-    ].filter(t => typeof t !== 'undefined');
+    // Re-discover swipe trackers across GNOME versions (incl. 49)
+    const trackers = [
+        // Common locations 40+
+        Main?.overview?._swipeTracker,
+        Main?.overview?._overview?._controls?._workspacesDisplay?._swipeTracker,
+        Main?.wm?._workspaceAnimation?._swipeTracker,
+        Main?.wm?._swipeTracker,
+        // Additional GNOME 48/49 variants
+        Main?.overview?._overview?._swipeTracker,
+        Main?.overview?._overview?._gestureManager?._swipeTracker,
+    ];
+
+    swipeTrackers = trackers.filter(t => typeof t !== 'undefined' && t !== null);
 }
 
 let actions;
